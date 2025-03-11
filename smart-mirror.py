@@ -3,10 +3,15 @@ from PIL import Image, ImageTk
 import cv2
 import speech_recognition as sr
 from datetime import datetime
+from dotenv import load_dotenv
 import openai
 import pygame
 import os
 import base64
+
+load_dotenv()
+
+openai.api_key = os.getenv('API_KEY')
 
 CONFIG_PROMPT = """Você é um assistente virtual chamado Espelho, integrado a um espelho inteligente. 
 Sua função é interagir com o usuário fornecendo informações úteis e respondendo perguntas de maneira educada e precisa.
