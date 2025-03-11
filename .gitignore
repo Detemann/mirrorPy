@@ -1,0 +1,5 @@
+.env
+*.xml
+*.png
+*.jpg
+*.mp3
