@@ -7,14 +7,12 @@ from dotenv import load_dotenv
 import openai
 import pygame
 import os
-import base64
+import time
 
 load_dotenv()
 
-openai.api_key = os.getenv('API_KEY')
-
 CONFIG_PROMPT = """Você é um assistente virtual chamado Espelho, integrado a um espelho inteligente. 
-Sua função é interagir com o usuário fornecendo informações úteis e respondendo perguntas de maneira educada e precisa.
+Sua função é interagir com o usuário fornecendo informações úteis e respondendo perguntas de maneira educada e precisa no idioma português do Brasil.
 
 Funções principais:
 1. Cumprimentar o usuário com um 'Bom dia', 'Boa tarde' ou 'Boa noite', dependendo do horário.
@@ -35,6 +33,16 @@ class SmartMirrorApp:
         self.root.attributes('-fullscreen', True)
         self.photoSend = False
 
+        self.client = openai.api_key = os.getenv('API_KEY')
+        
+        self.assistant = openai.beta.assistants.create(
+            name="espelho",
+            instructions=CONFIG_PROMPT,
+            model="gpt-4o",
+            tools=[]
+        )
+        self.thread = openai.beta.threads.create()
+
         self.canvas = tk.Canvas(root, bg="black")
         self.canvas.pack(fill="both", expand=True)
 
@@ -50,18 +58,14 @@ class SmartMirrorApp:
         
         self.update_video()
 
-        self.get_chatgpt_system_response(CONFIG_PROMPT)
-
         pygame.mixer.init()
 
         self.detect_face()
-
         self.update_time()
 
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone()
         self.start_listening()
-
 
         self.root.bind("<Escape>", lambda e: self.exit_app())
 
@@ -72,9 +76,7 @@ class SmartMirrorApp:
         self.root.destroy()
 
     def update_video(self):
-        """Captura frames da webcam e atualiza o fundo do Canvas."""
         ret, frame = self.cap.read()
-
         if ret:
             width = self.canvas.winfo_width()
             height = self.canvas.winfo_height()
@@ -88,7 +90,6 @@ class SmartMirrorApp:
         self.root.after(15, self.update_video)
 
     def update_time(self):
-        """Atualiza o horário exibido no Canvas a cada 1 segundo."""
         now = datetime.now().strftime("%H:%M:%S")
         self.canvas.itemconfig(self.time_text, text=now)
         self.root.after(1000, self.update_time)
@@ -100,7 +101,6 @@ class SmartMirrorApp:
             input=message,
             response_format="mp3"
         )
-
         response.stream_to_file("output.mp3")
         pygame.mixer.music.load('output.mp3')
         pygame.mixer.music.play()
@@ -110,11 +110,9 @@ class SmartMirrorApp:
 
         pygame.mixer.music.stop()
         pygame.mixer.music.unload()
-
         os.remove('output.mp3')
 
     def detect_face(self):
-        """Captura frames e realiza a detecção de rosto utilizando OpenCV."""
         face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
         ret, frame = self.cap.read()
         if ret:
@@ -123,70 +121,92 @@ class SmartMirrorApp:
             if len(faces) > 0:
                 text = "Rosto detectado"
                 cv2.imwrite('faceFrame.png', frame)
-                if(not self.photoSend):
-                    self.canvas.itemconfig(self.voice_text, text=f"Resposta: {self.get_chatgpt_response('Olá')}")
+                if not self.photoSend:
+                    self.photoSend = True
+                    try:
+                        with open('faceFrame.png', 'rb') as f:
+                            image_file = openai.files.create(
+                                file=f,
+                                purpose='assistants'
+                            )
+                        
+                        openai.beta.threads.messages.create(
+                            thread_id=self.thread.id,
+                            content=[
+                                {"type": "text", "text": "Rosto do usuário identificado pelo sistema"},
+                                {"type": "image_file", "image_file": {"file_id": image_file.id}}
+                            ],
+                            role="user"
+                        )
+                        
+                        run = openai.beta.threads.runs.create(
+                            thread_id=self.thread.id,
+                            assistant_id=self.assistant.id
+                        )
+                        
+                        run_status = self.wait_for_run_completion(run.id)
+                        
+                        if run_status.status == 'completed':
+                            messages = openai.beta.threads.messages.list(
+                                thread_id=self.thread.id
+                            )
+                            response = messages.data[0].content[0].text.value
+                            self.ttsAudio(response)
+                            self.canvas.itemconfig(self.voice_text, text=f"Resposta: {response}")
+                    except Exception as e:
+                        print(f"Erro: {e}")
             else: 
                 text = "Nenhum rosto detectado"
             self.canvas.itemconfig(self.face_text, text=text)
-    
-    def encode_image(self, image_path):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    
+        self.root.after(1000, self.detect_face)
+
+    def wait_for_run_completion(self, run_id):
+        while True:
+            run_status = openai.beta.threads.runs.retrieve(
+                thread_id=self.thread.id,
+                run_id=run_id
+            )
+            if run_status.status in ['completed', 'failed', 'cancelled']:
+                return run_status
+            time.sleep(0.5)
+
     def get_chatgpt_response(self, prompt):
         try:
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
+            openai.beta.threads.messages.create(
+                thread_id=self.thread.id,
+                content=[{"type": "text", "text": prompt}],
+                role="user"
             )
-
-            self.ttsAudio(response.choices[0].message.content.strip())
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(e)
-            return f"Erro ao acessar o ChatGPT: {e}"
-    
-    def get_chatgpt_system_response_image(self):
-        try:
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Rosto do usuario identificado pelo sistema"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self.encode_image('faceFrame.png')}"}}
-                    ]}
-                ]
+            
+            run = openai.beta.threads.runs.create(
+                thread_id=self.thread.id,
+                assistant_id=self.assistant.id
             )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(e)
-            return f"Erro ao acessar o ChatGPT: {e}"
-        
-    def get_chatgpt_system_response(self, prompt):
-        try:
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "system", "content": prompt}]
+            
+            self.wait_for_run_completion(run.id)
+            
+            messages = openai.beta.threads.messages.list(
+                thread_id=self.thread.id
             )
-            return response.choices[0].message.content.strip()
+            
+            self.canvas.itemconfig(self.voice_text, text=f"Resposta: {response}")
+            response = messages.data[0].content[0].text.value
+            self.ttsAudio(response)
         except Exception as e:
-            print(e)
-            return f"Erro ao acessar o ChatGPT: {e}"
+            print(f"Erro: {e}")
+            self.canvas.itemconfig(self.voice_text, text=f"Resposta: Ocorreu um erro. Olhe os logs.")
 
     def start_listening(self):
-        """Inicia o reconhecimento de voz em background."""
         def callback(recognizer, audio):
             try:
                 command = recognizer.recognize_google(audio, language='pt-BR')
                 if "espelho" in command:
-                    self.canvas.itemconfig(self.voice_text, text=f"Gerando resposta...")
-                    response = self.get_chatgpt_response(command)
-                    self.canvas.itemconfig(self.voice_text, text=f"Resposta: {response}")
+                    self.canvas.itemconfig(self.voice_text, text="Gerando resposta...")
+                    self.get_chatgpt_response(command)
             except sr.UnknownValueError:
                 print("Não entendi o comando")
             except sr.RequestError as e:
-                self.canvas.itemconfig(self.voice_text, text=f"Erro no serviço: {e}")
+                print(f"Erro no serviço: {e}")
 
         with self.microphone as source:
             self.recognizer.adjust_for_ambient_noise(source)
